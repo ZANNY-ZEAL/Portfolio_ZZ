@@ -1,0 +1,445 @@
+-- ============================================================
+--  CharacterController.lua
+--  A custom character controller demonstrating:
+--    > CFrame math — headbob effect using math.sin offsets
+--    > Raycasting (modern RaycastParams API) for ground detection
+--    > Metatables for OOP-style state management
+--    > RunService, UserInputService, TweenService (modern Roblox API)
+--    > Sprinting system with FOV tween feedback
+--    > Stamina system with ScreenGui bar that drains & regenerates
+--
+--  ** Place this LocalScript inside: StarterCharacterScripts **
+-- ============================================================
+
+local Players          = game:GetService("Players")
+local RunService       = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local TweenService     = game:GetService("TweenService")
+local Camera           = workspace.CurrentCamera
+
+local LocalPlayer      = Players.LocalPlayer
+local Character        = LocalPlayer.Character
+local Humanoid         = Character:WaitForChild("Humanoid")
+local HumanoidRootPart = Character:WaitForChild("HumanoidRootPart")
+
+-- ============================================================
+--  CONFIGURATION
+-- ============================================================
+local Config = {
+	-- Movement
+	WalkSpeed         = 16,
+	SprintSpeed       = 28,
+	VelocityThresh    = 0.5,               -- min horizontal speed to count as "moving"
+
+	-- Camera
+	NormalFOV         = 70,
+	SprintFOV         = 90,
+	FOVTweenTime      = 0.3,
+
+	-- Headbob
+	BobFreqWalk       = 8,                 -- oscillation frequency while walking
+	BobFreqSprint     = 14,                -- oscillation frequency while sprinting
+	BobAmplitudeY     = 0.12,             -- vertical bob height
+	BobAmplitudeX     = 0.06,             -- horizontal bob sway
+	BobSmoothing      = 10,               -- lerp speed for bob effect
+
+	-- Ground Detection
+	GroundRayLength   = 3.5,
+	SlopeLimit        = 50,
+
+	-- Stamina
+	MaxStamina        = 100,
+	SprintDrainRate   = 20,               -- stamina lost per second while sprinting
+	StaminaRegenRate  = 12,               -- stamina gained per second while not sprinting
+	StaminaRegenDelay = 1.2,              -- seconds after sprinting before regen begins
+	MinStaminaSprint  = 10,               -- minimum stamina required to start sprinting
+
+	-- Sprint Jump
+	NormalJumpHeight  = 7.2,                   -- default Roblox jump height
+	SprintJumpHeight  = 13,                    -- boosted jump height while sprinting
+	JumpBoostDrain    = 8,                     -- extra stamina cost for a sprint jump
+
+	-- Input
+	SprintKey         = Enum.KeyCode.LeftShift,
+}
+
+-- ============================================================
+--  STATE MACHINE  (OOP via Metatables)
+--  Tracks player state: Idle | Walking | Sprinting | Airborne
+-- ============================================================
+local StateMachine = {}
+StateMachine.__index = StateMachine
+
+function StateMachine.new(initialState: string)
+	local self     = setmetatable({}, StateMachine)
+	self.current   = initialState
+	self.previous  = nil
+	self.listeners = {}
+	return self
+end
+
+function StateMachine:OnEnter(targetState: string, callback: () -> ())
+	if not self.listeners[targetState] then
+		self.listeners[targetState] = {}
+	end
+	table.insert(self.listeners[targetState], callback)
+end
+
+function StateMachine:Transition(newState: string)
+	if self.current == newState then return end
+	self.previous = self.current
+	self.current  = newState
+	if self.listeners[newState] then
+		for _, fn in ipairs(self.listeners[newState]) do
+			fn()
+		end
+	end
+end
+
+function StateMachine:Is(state: string): boolean
+	return self.current == state
+end
+
+local PlayerState = StateMachine.new("Idle")
+
+-- ============================================================
+--  RAYCAST MODULE  (Ground Detection)
+--  Fires a downward ray and checks slope via surface normal
+-- ============================================================
+local Raycast = {}
+
+local RayParams = RaycastParams.new()
+RayParams.FilterType = Enum.RaycastFilterType.Exclude
+RayParams.FilterDescendantsInstances = { Character }
+
+function Raycast.CastGround(): RaycastResult?
+	local origin    = HumanoidRootPart.Position
+	local direction = Vector3.new(0, -Config.GroundRayLength, 0)
+	return workspace:Raycast(origin, direction, RayParams)
+end
+
+function Raycast.IsGrounded(): boolean
+	local result = Raycast.CastGround()
+	if not result then return false end
+	-- Dot product of surface normal with world UP gives cosine of slope angle
+	local slopeAngle = math.deg(math.acos(
+		math.clamp(result.Normal:Dot(Vector3.new(0, 1, 0)), -1, 1)
+	))
+	return slopeAngle <= Config.SlopeLimit
+end
+
+-- ============================================================
+--  STAMINA SYSTEM
+--  Drains while sprinting, regenerates after a delay
+--  Displays a ScreenGui bar that updates every frame
+-- ============================================================
+local Stamina = {}
+Stamina.Value        = Config.MaxStamina   -- current stamina
+Stamina.RegenTimer   = 0                   -- countdown before regen kicks in
+Stamina.Depleted     = false               -- true when stamina hit 0 (prevents instant re-sprint)
+
+-- Build the stamina UI entirely in code (no need for Studio GUI editor)
+local StaminaGui = Instance.new("ScreenGui")
+StaminaGui.Name            = "StaminaGui"
+StaminaGui.ResetOnSpawn    = false
+StaminaGui.ZIndexBehavior  = Enum.ZIndexBehavior.Sibling
+StaminaGui.Parent          = LocalPlayer.PlayerGui
+
+-- Outer background frame
+local StaminaBg = Instance.new("Frame")
+StaminaBg.Name              = "Background"
+StaminaBg.Size              = UDim2.new(0, 220, 0, 18)
+StaminaBg.Position          = UDim2.new(0.5, -110, 0.88, 0)
+StaminaBg.BackgroundColor3  = Color3.fromRGB(30, 30, 30)
+StaminaBg.BorderSizePixel   = 0
+StaminaBg.Parent            = StaminaGui
+
+local BgCorner = Instance.new("UICorner")
+BgCorner.CornerRadius = UDim.new(0, 6)
+BgCorner.Parent       = StaminaBg
+
+-- Inner fill bar
+local StaminaBar = Instance.new("Frame")
+StaminaBar.Name             = "Bar"
+StaminaBar.Size             = UDim2.new(1, 0, 1, 0)
+StaminaBar.BackgroundColor3 = Color3.fromRGB(80, 200, 120)
+StaminaBar.BorderSizePixel  = 0
+StaminaBar.Parent           = StaminaBg
+
+local BarCorner = Instance.new("UICorner")
+BarCorner.CornerRadius = UDim.new(0, 6)
+BarCorner.Parent       = StaminaBar
+
+-- Label showing "STAMINA"
+local StaminaLabel = Instance.new("TextLabel")
+StaminaLabel.Size                = UDim2.new(1, 0, 1, 0)
+StaminaLabel.BackgroundTransparency = 1
+StaminaLabel.Text                = "STAMINA"
+StaminaLabel.TextColor3          = Color3.fromRGB(255, 255, 255)
+StaminaLabel.TextScaled          = true
+StaminaLabel.Font                = Enum.Font.GothamBold
+StaminaLabel.Parent              = StaminaBg
+
+-- Update the bar width and colour based on current stamina fraction
+function Stamina.UpdateUI()
+	local fraction = math.clamp(Stamina.Value / Config.MaxStamina, 0, 1)
+	StaminaBar.Size = UDim2.new(fraction, 0, 1, 0)
+
+	-- Colour shifts: green → yellow → red as stamina drops
+	if fraction > 0.5 then
+		StaminaBar.BackgroundColor3 = Color3.fromRGB(80, 200, 120)
+	elseif fraction > 0.25 then
+		StaminaBar.BackgroundColor3 = Color3.fromRGB(230, 180, 50)
+	else
+		StaminaBar.BackgroundColor3 = Color3.fromRGB(210, 60, 60)
+	end
+end
+
+-- Called every Heartbeat to drain or regenerate stamina
+function Stamina.Update(dt: number, isSprinting: boolean)
+	if isSprinting then
+		-- Drain stamina while actively sprinting
+		Stamina.RegenTimer = Config.StaminaRegenDelay
+		Stamina.Value      = math.max(0, Stamina.Value - Config.SprintDrainRate * dt)
+
+		-- If stamina bottoms out, force sprint to stop and flag as depleted
+		if Stamina.Value <= 0 then
+			Stamina.Depleted = true
+		end
+	else
+		-- Count down regen delay, then regenerate
+		if Stamina.RegenTimer > 0 then
+			Stamina.RegenTimer = math.max(0, Stamina.RegenTimer - dt)
+		else
+			Stamina.Value = math.min(Config.MaxStamina, Stamina.Value + Config.StaminaRegenRate * dt)
+			-- Once stamina recovers past minimum threshold, allow sprinting again
+			if Stamina.Depleted and Stamina.Value >= Config.MinStaminaSprint then
+				Stamina.Depleted = false
+			end
+		end
+	end
+
+	Stamina.UpdateUI()
+end
+
+-- Returns true if the player has enough stamina to sprint
+function Stamina.CanSprint(): boolean
+	return not Stamina.Depleted and Stamina.Value >= Config.MinStaminaSprint
+end
+
+-- ============================================================
+--  CAMERA CONTROLLER
+--  Handles FOV tweening and headbob via CFrame math
+-- ============================================================
+local CameraController = {}
+CameraController.BobClock  = 0   -- accumulates time for sin wave input
+CameraController.BobOffset = CFrame.identity  -- current bob CFrame offset
+
+function CameraController.TweenFOV(targetFOV: number)
+	local info  = TweenInfo.new(Config.FOVTweenTime, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+	TweenService:Create(Camera, info, { FieldOfView = targetFOV }):Play()
+end
+
+function CameraController.ResetFOV()
+	Camera.FieldOfView = Config.NormalFOV
+end
+
+-- Headbob: offsets the camera CFrame each frame using sin/cos waves
+-- This gives the feeling of natural head movement while walking/sprinting
+function CameraController.UpdateHeadbob(dt: number, isMoving: boolean, isSprinting: boolean)
+	local targetOffset = CFrame.identity  -- default: no bob when idle or airborne
+
+	if isMoving then
+		-- Choose frequency based on movement state
+		local freq = isSprinting and Config.BobFreqSprint or Config.BobFreqWalk
+
+		-- Advance the clock proportional to delta time and frequency
+		CameraController.BobClock += dt * freq
+
+		-- Calculate vertical and horizontal offsets using sin/cos
+		-- Y uses sin for up-down, X uses cos for side-to-side sway
+		local bobY = math.sin(CameraController.BobClock) * Config.BobAmplitudeY
+		local bobX = math.cos(CameraController.BobClock * 0.5) * Config.BobAmplitudeX
+
+		-- Build the offset CFrame from the two scalar values
+		targetOffset = CFrame.new(bobX, bobY, 0)
+	else
+		-- Slowly reset clock to zero when idle to avoid sudden jump on next step
+		CameraController.BobClock = 0
+	end
+
+	-- Lerp smoothly toward the target offset every frame
+	CameraController.BobOffset = CameraController.BobOffset:Lerp(
+		targetOffset,
+		math.clamp(dt * Config.BobSmoothing, 0, 1)
+	)
+
+	-- Apply the offset by multiplying it onto the camera's current CFrame
+	Camera.CFrame = Camera.CFrame * CameraController.BobOffset
+end
+
+-- ============================================================
+--  MOVEMENT MODULE
+--  Speed control and velocity-based movement detection
+-- ============================================================
+local Movement = {}
+
+function Movement.SetSpeed(speed: number)
+	Humanoid.WalkSpeed = speed
+end
+
+-- Uses AssemblyLinearVelocity for reliable horizontal movement detection
+function Movement.IsMoving(): boolean
+	local vel = HumanoidRootPart.AssemblyLinearVelocity
+	return Vector3.new(vel.X, 0, vel.Z).Magnitude > Config.VelocityThresh
+end
+
+-- Returns camera-relative movement direction using CFrame math
+function Movement.GetCameraRelativeDirection(): Vector3
+	local moveVec = Humanoid.MoveDirection
+	if moveVec.Magnitude == 0 then return Vector3.zero end
+
+	local look      = Camera.CFrame.LookVector
+	local flatLook  = Vector3.new(look.X, 0, look.Z).Unit
+	local flatCF    = CFrame.lookAt(Vector3.zero, flatLook)
+
+	return flatCF:VectorToWorldSpace(Vector3.new(moveVec.X, 0, moveVec.Z)).Unit
+end
+
+-- ============================================================
+--  SPRINT SYSTEM
+-- ============================================================
+local Sprint = {}
+Sprint.Active = false
+
+function Sprint.Start()
+	if Sprint.Active then return end
+	if not Stamina.CanSprint() then return end  -- block if stamina too low
+	Sprint.Active = true
+	Movement.SetSpeed(Config.SprintSpeed)
+	CameraController.TweenFOV(Config.SprintFOV)
+	PlayerState:Transition("Sprinting")
+end
+
+function Sprint.Stop()
+	if not Sprint.Active then return end
+	Sprint.Active = false
+	Movement.SetSpeed(Config.WalkSpeed)
+	CameraController.TweenFOV(Config.NormalFOV)
+end
+
+-- ============================================================
+--  INPUT HANDLING
+-- ============================================================
+
+UserInputService.InputBegan:Connect(function(input: InputObject, gameProcessed: boolean)
+	if gameProcessed then return end
+
+	if input.KeyCode == Config.SprintKey then
+		if Raycast.IsGrounded() and Stamina.CanSprint() then
+			Sprint.Start()
+		end
+	end
+
+	-- Sprint jump: if player jumps while sprinting, boost jump height
+	-- This carries horizontal momentum upward for a more powerful leap
+	if input.KeyCode == Enum.KeyCode.Space then
+		if Sprint.Active and Raycast.IsGrounded() and Stamina.CanSprint() then
+			-- Boost jump height this frame
+			Humanoid.JumpHeight = Config.SprintJumpHeight
+
+			-- Drain a little extra stamina for the boosted jump
+			Stamina.Value = math.max(0, Stamina.Value - Config.JumpBoostDrain)
+
+			-- Reset jump height back to normal after a short delay
+			task.delay(0.2, function()
+				Humanoid.JumpHeight = Config.NormalJumpHeight
+			end)
+		else
+			-- Make sure jump height is always normal when not sprinting
+			Humanoid.JumpHeight = Config.NormalJumpHeight
+		end
+	end
+end)
+
+UserInputService.InputEnded:Connect(function(input: InputObject, _: boolean)
+	if input.KeyCode == Config.SprintKey then
+		Sprint.Stop()
+	end
+end)
+
+-- ============================================================
+--  STATE LISTENERS
+-- ============================================================
+
+PlayerState:OnEnter("Idle", function()
+	print("[CharacterController] State → Idle")
+end)
+
+PlayerState:OnEnter("Walking", function()
+	print("[CharacterController] State → Walking")
+end)
+
+PlayerState:OnEnter("Sprinting", function()
+	print("[CharacterController] State → Sprinting")
+end)
+
+PlayerState:OnEnter("Airborne", function()
+	print("[CharacterController] State → Airborne")
+end)
+
+-- ============================================================
+--  MAIN LOOP  (RunService.Heartbeat)
+--  Updates state, stamina, and headbob every physics frame
+-- ============================================================
+RunService.Heartbeat:Connect(function(dt: number)
+	local grounded  = Raycast.IsGrounded()
+	local isMoving  = Movement.IsMoving()
+
+	-- Force stop sprint if stamina runs out mid-sprint
+	if Sprint.Active and Stamina.Depleted then
+		Sprint.Stop()
+	end
+
+	-- Update stamina drain / regen every frame
+	Stamina.Update(dt, Sprint.Active)
+
+	-- ── Airborne ─────────────────────────────────────────────
+	if not grounded then
+		if not PlayerState:Is("Airborne") then
+			Sprint.Stop()
+			PlayerState:Transition("Airborne")
+		end
+		-- Still update headbob (freeze it while airborne)
+		CameraController.UpdateHeadbob(dt, false, false)
+		return
+	end
+
+	-- ── Just landed ───────────────────────────────────────────
+	if PlayerState:Is("Airborne") then
+		if UserInputService:IsKeyDown(Config.SprintKey) and Stamina.CanSprint() then
+			Sprint.Start()
+		end
+	end
+
+	-- ── Ground state ─────────────────────────────────────────
+	if Sprint.Active then
+		PlayerState:Transition("Sprinting")
+	elseif isMoving then
+		PlayerState:Transition("Walking")
+	else
+		PlayerState:Transition("Idle")
+	end
+
+	-- Update headbob using current movement state
+	CameraController.UpdateHeadbob(dt, isMoving, Sprint.Active)
+end)
+
+-- ============================================================
+--  INIT
+-- ============================================================
+Movement.SetSpeed(Config.WalkSpeed)
+CameraController.ResetFOV()
+Stamina.UpdateUI()
+Humanoid.JumpHeight = Config.NormalJumpHeight
+print("[CharacterController] Loaded — State:", PlayerState.current)
