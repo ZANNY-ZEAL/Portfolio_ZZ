@@ -443,3 +443,12 @@ CameraController.ResetFOV()
 Stamina.UpdateUI()
 Humanoid.JumpHeight = Config.NormalJumpHeight
 print("[CharacterController] Loaded — State:", PlayerState.current)
+
+
+
+
+
+
+
+[IN ORDER TO ACCELERATE PLEASE CHECK YOUR SWITCH LOCK AND IF THE SWITCH LOCK IS ON IT NOT GONNA WORL]
+[BY ZANNY_ZEAL]
