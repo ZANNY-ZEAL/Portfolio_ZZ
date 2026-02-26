@@ -7,8 +7,8 @@
 --    > RunService, UserInputService, TweenService (modern Roblox API)
 --    > Sprinting system with FOV tween feedback
 --    > Stamina system with ScreenGui bar that drains & regenerates
---
---  ** Place this LocalScript inside: StarterCharacterScripts **
+----[game link : https://www.roblox.com/share?code=0dc685efe270f54b81777d1f2e4797f3&type=ExperienceDetails&stamp=1772125736188]
+-- INSIDE LOCAL SCRIPT INSIDE PLAYERCHARACTERSCRIPTS
 -- ============================================================
 
 local Players          = game:GetService("Players")
