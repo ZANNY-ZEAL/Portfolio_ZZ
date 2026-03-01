@@ -1,0 +1,178 @@
+-- CameraController LocalScript
+-- Place inside StarterPlayerScripts
+-- Modern Roblox API | Luau Typed | Portfolio Piece
+
+--// Services
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local ContextActionService = game:GetService("ContextActionService")
+
+--// Player & Character
+local LocalPlayer = Players.LocalPlayer
+local Camera = workspace.CurrentCamera
+
+--// Types
+type ShakeData = {
+	trauma: number,
+	maxAngle: number,
+	maxOffset: number,
+	decay: number,
+}
+
+type CameraConfig = {
+	distance: number,
+	minDistance: number,
+	maxDistance: number,
+	sensitivity: number,
+	lerpSpeed: number,
+	minPitch: number,
+	maxPitch: number,
+}
+
+--// Config
+local Config: CameraConfig = {
+	distance = 18,
+	minDistance = 5,
+	maxDistance = 40,
+	sensitivity = 0.35,
+	lerpSpeed = 12,
+	minPitch = math.rad(-75),
+	maxPitch = math.rad(60),
+}
+
+local Shake: ShakeData = {
+	trauma = 0,
+	maxAngle = 5,
+	maxOffset = 0.8,
+	decay = 1.8,
+}
+
+--// State
+local yaw: number = 0
+local pitch: number = math.rad(15)
+local currentCFrame: CFrame = CFrame.identity
+local isDragging: boolean = false
+
+--// Noise seeds for shake (so X/Y/Z feel independent)
+local SEED_X: number = math.random(1, 1000)
+local SEED_Y: number = math.random(1, 1000)
+local SEED_Z: number = math.random(1, 1000)
+local noiseTime: number = 0
+
+--// Helper: get root part safely
+local function getRootPart(): BasePart?
+	local character = LocalPlayer.Character
+	if not character then return nil end
+	return character:FindFirstChild("HumanoidRootPart") :: BasePart?
+end
+
+--// Shake API
+local function addShake(amount: number): ()
+	Shake.trauma = math.clamp(Shake.trauma + amount, 0, 1)
+end
+
+--// Get shake CFrame offset using Perlin noise
+local function getShakeCFrame(dt: number): CFrame
+	if Shake.trauma <= 0.001 then
+		return CFrame.identity
+	end
+
+	noiseTime += dt * 8
+	local traumaSq = Shake.trauma * Shake.trauma
+
+	local angleX = math.rad(Shake.maxAngle) * traumaSq * math.noise(SEED_X, noiseTime)
+	local angleY = math.rad(Shake.maxAngle) * traumaSq * math.noise(SEED_Y, noiseTime)
+	local offsetX = Shake.maxOffset * traumaSq * math.noise(SEED_Z, noiseTime + 99)
+	local offsetY = Shake.maxOffset * traumaSq * math.noise(SEED_X + SEED_Y, noiseTime + 50)
+
+	return CFrame.new(offsetX, offsetY, 0) * CFrame.Angles(angleX, angleY, 0)
+end
+
+--// Input: mouse drag for orbit
+UserInputService.InputChanged:Connect(function(input: InputObject, gameProcessed: boolean)
+	if gameProcessed then return end
+
+	if input.UserInputType == Enum.UserInputType.MouseMovement and isDragging then
+		local delta = input.Delta
+		yaw -= math.rad(delta.X * Config.sensitivity)
+		pitch = math.clamp(
+			pitch - math.rad(delta.Y * Config.sensitivity),
+			Config.minPitch,
+			Config.maxPitch
+		)
+	end
+
+	-- Zoom with scroll wheel
+	if input.UserInputType == Enum.UserInputType.MouseWheel then
+		Config.distance = math.clamp(
+			Config.distance - input.Position.Z * 2,
+			Config.minDistance,
+			Config.maxDistance
+		)
+	end
+end)
+
+UserInputService.InputBegan:Connect(function(input: InputObject, gameProcessed: boolean)
+	if gameProcessed then return end
+	if input.UserInputType == Enum.UserInputType.MouseButton2 then
+		isDragging = true
+		UserInputService.MouseBehavior = Enum.MouseBehavior.LockCurrentPosition
+	end
+end)
+
+UserInputService.InputEnded:Connect(function(input: InputObject, _gameProcessed: boolean)
+	if input.UserInputType == Enum.UserInputType.MouseButton2 then
+		isDragging = false
+		UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+	end
+end)
+
+--// Demo shake bind: press F to add trauma (showcase / testing)
+ContextActionService:BindAction(
+	"TestShake",
+	function(_name: string, state: Enum.UserInputState, _input: InputObject): Enum.ContextActionResult
+		if state == Enum.UserInputState.Begin then
+			addShake(0.6)
+		end
+		return Enum.ContextActionResult.Pass
+	end,
+	false,
+	Enum.KeyCode.F
+)
+
+--// Main camera loop
+Camera.CameraType = Enum.CameraType.Scriptable
+
+RunService.RenderStepped:Connect(function(dt: number)
+	local root = getRootPart()
+	if not root then return end
+
+	local origin: Vector3 = root.Position + Vector3.new(0, 1.5, 0)
+
+	-- Build orbit CFrame
+	local orbitCFrame: CFrame = CFrame.new(origin)
+		* CFrame.Angles(0, yaw, 0)
+		* CFrame.Angles(pitch, 0, 0)
+		* CFrame.new(0, 0, Config.distance)
+
+	-- Smooth lerp
+	currentCFrame = currentCFrame:Lerp(orbitCFrame, math.clamp(Config.lerpSpeed * dt, 0, 1))
+
+	-- Decay trauma
+	Shake.trauma = math.max(0, Shake.trauma - Shake.decay * dt)
+
+	-- Apply shake on top
+	local shakeCF: CFrame = getShakeCFrame(dt)
+	Camera.CFrame = currentCFrame * shakeCF
+end)
+
+--// Cleanup on character respawn (reset camera smoothly)
+LocalPlayer.CharacterAdded:Connect(function()
+	task.wait(0.1) -- let character load
+	local root = getRootPart()
+	if root then
+		currentCFrame = CFrame.new(root.Position + Vector3.new(0, 1.5, Config.distance))
+	end
+	Shake.trauma = 0
+end)
