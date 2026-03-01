@@ -1,0 +1,95 @@
+the system --
+local Players = game:GetService("Players")
+
+local part1 = workspace:WaitForChild("1_spawn_part")
+local part2 = workspace:WaitForChild("2_spawn point")
+local part3 = workspace:WaitForChild("3_spawn_point")
+local part4 = workspace:WaitForChild("4_spawn point")
+
+local platforms = {part1, part2, part3, part4}
+
+local function activatePlatform(index)
+	for i, part in ipairs(platforms) do
+		if i == index then
+			part.Transparency = 0
+			part.CanCollide = true
+		else
+			part.Transparency = 1
+			part.CanCollide = false
+		end
+	end
+end
+
+local function startTimer(player)
+
+	local totalTime = 300 -- 5 minutes
+	local platformIndex = 1
+
+	activatePlatform(1)
+
+	local playerGui = player:WaitForChild("PlayerGui")
+	local screen = playerGui:WaitForChild("ScreenGui")
+	local label = screen:WaitForChild("TimerLabel")
+
+	for timeLeft = totalTime, 0, -1 do
+
+		local minutes = math.floor(timeLeft / 60)
+		local seconds = timeLeft % 60
+		label.Text = string.format("%d:%02d", minutes, seconds)
+
+		-- switch platform every 25 seconds
+		if timeLeft % 25 == 0 and timeLeft ~= totalTime then
+			platformIndex += 1
+			if platformIndex <= #platforms then
+				activatePlatform(platformIndex)
+			end
+		end
+
+		task.wait(1)
+	end
+end
+
+Players.PlayerAdded:Connect(function(player)
+	player.CharacterAdded:Connect(function()
+		task.wait(1)
+		startTimer(player)
+	end)
+end)
+--AFK DEATH
+
+local Players = game:GetService("Players")
+
+local AFK_TIME = 5 -- seconds
+
+local function monitorPlayer(character)
+
+	local humanoid = character:WaitForChild("Humanoid")
+	local root = character:WaitForChild("HumanoidRootPart")
+
+	local idleTime = 0
+
+	while humanoid.Health > 0 do
+
+		task.wait(1)
+
+		-- Check if player is barely moving
+		if root.AssemblyLinearVelocity.Magnitude < 1 then
+			idleTime += 1
+		else
+			idleTime = 0
+		end
+
+		-- If idle too long, kill
+		if idleTime >= AFK_TIME then
+			humanoid.Health = 0
+			break
+		end
+	end
+end
+
+Players.PlayerAdded:Connect(function(player)
+	player.CharacterAdded:Connect(function(character)
+		task.wait(1)
+		monitorPlayer(character)
+	end)
+end)
