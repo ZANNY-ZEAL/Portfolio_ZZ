@@ -1,0 +1,74 @@
+import pandas as pd
+import matplotlib.pyplot as plt
+from pathlib import Path
+
+# ---------------- CONFIG ---------------- #
+INPUT_FILE = "data/sales.csv"      # Make sure this exists
+OUTPUT_DIR = Path("output")
+OUTPUT_DIR.mkdir(exist_ok=True)
+
+# ---------------- LOAD DATA ---------------- #
+df = pd.read_csv(INPUT_FILE)
+
+# Optional: check columns
+print("Columns in CSV:", df.columns.tolist())
+
+# ---------------- CLEAN DATA ---------------- #
+# lowercase & strip columns
+df.columns = df.columns.str.lower().str.strip()
+
+# Convert date
+df["date"] = pd.to_datetime(df["orderdate"], dayfirst=True, errors="coerce")
+
+# Fill missing quantity and price
+df["quantity"] = df["quantity"].fillna(0).astype(int)
+df["price"] = df["price"].fillna(df["price"].median())
+
+# Drop rows missing date or product
+df = df.dropna(subset=["date", "product"])
+df = df.drop_duplicates()
+
+# Compute total sales
+df["total_sales"] = df["quantity"] * df["price"]
+
+# ---------------- SAVE CLEAN DATA ---------------- #
+df.to_csv(OUTPUT_DIR / "clean_data.csv", index=False)
+print("✅ Cleaned data saved!")
+
+# ---------------- ANALYSIS ---------------- #
+sales_by_date = df.groupby("date")["total_sales"].sum()
+top_products = df.groupby("product")["total_sales"].sum().sort_values(ascending=False).head(10)
+category_share = df.groupby("category")["total_sales"].sum()
+
+# ---------------- VISUALIZATION ---------------- #
+
+# Sales Trend
+plt.figure()
+sales_by_date.plot()
+plt.title("Sales Over Time")
+plt.xlabel("Date")
+plt.ylabel("Total Sales")
+plt.tight_layout()
+plt.savefig(OUTPUT_DIR / "sales_trend.png")
+plt.close()
+
+# Top Products
+plt.figure()
+top_products.plot(kind="bar")
+plt.title("Top 10 Products by Sales")
+plt.xlabel("Product")
+plt.ylabel("Total Sales")
+plt.tight_layout()
+plt.savefig(OUTPUT_DIR / "top_products.png")
+plt.close()
+
+# Category Share
+plt.figure()
+category_share.plot(kind="pie", autopct="%1.1f%%")
+plt.title("Sales Distribution by Category")
+plt.ylabel("")
+plt.tight_layout()
+plt.savefig(OUTPUT_DIR / "category_share.png")
+plt.close()
+
+print("✅ Analysis complete. Charts saved in /output folder")
